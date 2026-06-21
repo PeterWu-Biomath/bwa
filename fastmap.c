@@ -481,3 +481,52 @@ int main_fastmap(int argc, char *argv[])
 	err_gzclose(fp);
 	return 0;
 }
+
+static uint64_t capt_sa_hit = 0, capt_sa_miss = 0;
+
+static bwtint_t capt_sa_override_fn(const bwt_t *bwt, bwtint_t k)
+{
+	extern const void *g_capt;
+	extern bwtint_t (*bwt_sa_override)(const bwt_t *bwt, bwtint_t k);
+	const capt_t *c = (const capt_t *)g_capt;
+	int64_t pos = capt_lookup_pos(c, (uint64_t)k);
+	if (pos >= 0) { capt_sa_hit++; return (bwtint_t)pos; }
+	capt_sa_miss++;
+	bwt_sa_override = NULL;
+	bwtint_t r = bwt_sa(bwt, k);
+	bwt_sa_override = capt_sa_override_fn;
+	return r;
+}
+
+int main_mem_capture(int argc, char *argv[])
+{
+	extern const void *g_capt;
+	extern bwtint_t (*bwt_sa_override)(const bwt_t *bwt, bwtint_t k);
+	extern int main_mem(int argc, char *argv[]);
+
+	if (argc < 2) {
+		fprintf(stderr, "Usage: bwa mem_capture <capt_prefix> [mem options] <ref.fa> <in.fq>\n");
+		return 1;
+	}
+
+	char buf[1024];
+	snprintf(buf, sizeof(buf), "%s.capt", argv[1]);
+	capt_t *capt = capt_restore(buf);
+	if (!capt) {
+		fprintf(stderr, "[E::%s] fail to load '%s'\n", __func__, buf);
+		return 1;
+	}
+	*(const void**)&g_capt = capt;
+	bwt_sa_override = capt_sa_override_fn;
+	fprintf(stderr, "[M::%s] capture loaded, using capt_smem1 + fast bwt_sa\n", __func__);
+
+	int ret = main_mem(argc - 1, argv + 1);
+
+	bwt_sa_override = NULL;
+	*(const void**)&g_capt = 0;
+	fprintf(stderr, "[M::%s] bwt_sa stats: hit=%llu miss=%llu (%.1f%% hit)\n",
+		__func__, (unsigned long long)capt_sa_hit, (unsigned long long)capt_sa_miss,
+		capt_sa_hit+capt_sa_miss ? 100.0*capt_sa_hit/(capt_sa_hit+capt_sa_miss) : 0.0);
+	capt_destroy(capt);
+	return ret;
+}

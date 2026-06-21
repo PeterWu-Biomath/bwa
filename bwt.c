@@ -39,6 +39,8 @@
 #  include "malloc_wrap.h"
 #endif
 
+bwtint_t (*bwt_sa_override)(const bwt_t *bwt, bwtint_t k) = NULL;
+
 void bwt_gen_cnt_table(bwt_t *bwt)
 {
 	int i, j;
@@ -85,6 +87,7 @@ void bwt_cal_sa(bwt_t *bwt, int intv)
 
 bwtint_t bwt_sa(const bwt_t *bwt, bwtint_t k)
 {
+	if (bwt_sa_override) return bwt_sa_override(bwt, k);
 	bwtint_t sa = 0, mask = bwt->sa_intv - 1;
 	while (k & mask) {
 		++sa;
@@ -274,7 +277,7 @@ void bwt_extend(const bwt_t *bwt, const bwtintv_t *ik, bwtintv_t ok[4], int is_b
 	ok[0].x[is_back] = ok[1].x[is_back] + ok[1].x[2];
 }
 
-static void bwt_reverse_intvs(bwtintv_v *p)
+void bwt_reverse_intvs(bwtintv_v *p)
 {
 	if (p->n > 1) {
 		int j;
@@ -285,9 +288,18 @@ static void bwt_reverse_intvs(bwtintv_v *p)
 		}
 	}
 }
+
+void bwtintv_print(const bwtintv_t *p, const char *label)
+{
+	fprintf(stderr, "  [%s] genome:    k=%lld l=%lld s=%lld info=(hi=%u,lo=%u)\n",
+                label, (long long)p->x[0], (long long)p->x[1], (long long)p->x[2],
+                (unsigned)(p->info >> 32), (unsigned)(p->info & 0xffffffff));
+}
+
 // NOTE: $max_intv is not currently used in BWA-MEM
 int bwt_smem1a(const bwt_t *bwt, int len, const uint8_t *q, int x, int min_intv, uint64_t max_intv, bwtintv_v *mem, bwtintv_v *tmpvec[2])
 {
+	//printf("max_intv,min_intv=(%ld,%d)\n",max_intv,min_intv);
 	int i, j, c, ret;
 	bwtintv_t ik, ok[4];
 	bwtintv_v a[2], *prev, *curr, *swap;
@@ -322,7 +334,10 @@ int bwt_smem1a(const bwt_t *bwt, int len, const uint8_t *q, int x, int min_intv,
 	bwt_reverse_intvs(curr); // s.t. smaller intervals (i.e. longer matches) visited first
 	ret = curr->a[0].info; // this will be the returned value
 	swap = curr; curr = prev; prev = swap;
-
+	/*fprintf(stderr, "[capt_smem1] prev (forward hits): n=%zu\n", prev->n);
+	for (int _i = 0; _i < (int)prev->n; _i++)
+		bwtintv_print(&prev->a[_i], "prev");
+	*/
 	for (i = x - 1; i >= -1; --i) { // backward search for MEMs
 		c = i < 0? -1 : q[i] < 4? q[i] : -1; // c==-1 if i<0 or q[i] is an ambiguous base
 		for (j = 0, curr->n = 0; j < prev->n; ++j) {

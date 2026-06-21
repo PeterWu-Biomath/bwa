@@ -59,6 +59,9 @@ typedef struct {
 	bwtint_t *sa;
 } bwt_t;
 
+/* hook for capture: override bwt_sa with fast lookup */
+extern bwtint_t (*bwt_sa_override)(const bwt_t *bwt, bwtint_t k);
+
 typedef struct {
 	bwtint_t x[3], info;
 } bwtintv_t;
@@ -130,3 +133,4 @@ extern "C" {
 #endif
 
 #endif
+void bwt_reverse_intvs(bwtintv_v *p);

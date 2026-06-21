@@ -206,6 +206,41 @@ extern "C" {
 	 */
 	void mem_pestat(const mem_opt_t *opt, int64_t l_pac, int n, const mem_alnreg_v *regs, mem_pestat_t pes[4]);
 
+	/* Types and functions for seed chaining (used by capture pipeline) */
+	typedef struct {
+		int64_t rbeg;
+		int32_t qbeg, len;
+		int score;
+	} mem_seed_t;
+	typedef struct {
+		int n, m, first, rid;
+		uint32_t w:29, kept:2, is_alt:1;
+		float frac_rep;
+		int64_t pos;
+		mem_seed_t *seeds;
+	} mem_chain_t;
+	typedef struct { size_t n, m; mem_chain_t *a; } mem_chain_v;
+
+#include "capt.h"
+	extern const void *g_capt;
+	mem_alnreg_v capt_mem_align1_core(const mem_opt_t *opt, const capt_t *capt,
+		const bwt_t *g_bwt, const bntseq_t *bns, const uint8_t *pac,
+		int l_seq, char *seq, void *buf);
+	mem_alnreg_v mem_align1_core(const mem_opt_t *opt, const bwt_t *bwt,
+		const bntseq_t *bns, const uint8_t *pac, int l_seq, char *seq, void *buf);
+	mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt,
+		const bntseq_t *bns, int len, const uint8_t *seq, void *buf);
+	int mem_chain_flt(const mem_opt_t *opt, int n_chn, mem_chain_t *a);
+	void mem_flt_chained_seeds(const mem_opt_t *opt, const bntseq_t *bns,
+		const uint8_t *pac, int l_query, const uint8_t *query,
+		int n_chn, mem_chain_t *a);
+	void mem_print_chain(const bntseq_t *bns, mem_chain_v *chn);
+	void mem_chain2aln(const mem_opt_t *opt, const bntseq_t *bns,
+		const uint8_t *pac, int l_query, const uint8_t *query,
+		const mem_chain_t *c, mem_alnreg_v *av);
+	int mem_sort_dedup_patch(const mem_opt_t *opt, const bntseq_t *bns,
+		const uint8_t *pac, uint8_t *query, int n, mem_alnreg_t *a);
+
 #ifdef __cplusplus
 }
 #endif

@@ -37,6 +37,9 @@
 #include "kstring.h"
 #include "bwamem.h"
 #include "bntseq.h"
+#include "capt.h"
+extern mem_alnreg_v capt_mem_align1_core(const mem_opt_t*, const capt_t*,
+	const bwt_t*, const bntseq_t*, const uint8_t*, int, char*, void*);
 #include "ksw.h"
 #include "kvec.h"
 #include "ksort.h"
@@ -70,6 +73,7 @@
  */
 
 static const bntseq_t *global_bns = 0; // for debugging only
+const void *g_capt = 0; /* capture index; if set, worker1 uses capt_mem_align1_core */
 
 mem_opt_t *mem_opt_init()
 {
@@ -118,6 +122,7 @@ KSORT_INIT(mem_intv, bwtintv_t, intv_lt)
 
 typedef struct {
 	bwtintv_v mem, mem1, *tmpv[2];
+	capt_intv_v *capt_tmpv[2];
 } smem_aux_t;
 
 static smem_aux_t *smem_aux_init()
@@ -126,6 +131,8 @@ static smem_aux_t *smem_aux_init()
 	a = calloc(1, sizeof(smem_aux_t));
 	a->tmpv[0] = calloc(1, sizeof(bwtintv_v));
 	a->tmpv[1] = calloc(1, sizeof(bwtintv_v));
+	a->capt_tmpv[0] = calloc(1, sizeof(capt_intv_v));
+	a->capt_tmpv[1] = calloc(1, sizeof(capt_intv_v));
 	return a;
 }
 
@@ -133,6 +140,8 @@ static void smem_aux_destroy(smem_aux_t *a)
 {	
 	free(a->tmpv[0]->a); free(a->tmpv[0]);
 	free(a->tmpv[1]->a); free(a->tmpv[1]);
+	free(a->capt_tmpv[0]->a); free(a->capt_tmpv[0]);
+	free(a->capt_tmpv[1]->a); free(a->capt_tmpv[1]);
 	free(a->mem.a); free(a->mem1.a);
 	free(a);
 }
@@ -146,7 +155,7 @@ static void mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, co
 	// first pass: find all SMEMs
 	while (x < len) {
 		if (seq[x] < 4) {
-			x = bwt_smem1(bwt, len, seq, x, start_width, &a->mem1, a->tmpv);
+			if (g_capt) x = capt_smem1((const capt_t*)g_capt, bwt, len, seq, x, start_width, &a->mem1, a->capt_tmpv); else x = bwt_smem1(bwt, len, seq, x, start_width, &a->mem1, a->tmpv);
 			for (i = 0; i < a->mem1.n; ++i) {
 				bwtintv_t *p = &a->mem1.a[i];
 				int slen = (uint32_t)p->info - (p->info>>32); // seed length
@@ -190,22 +199,6 @@ static void mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, co
 /************
  * Chaining *
  ************/
-
-typedef struct {
-	int64_t rbeg;
-	int32_t qbeg, len;
-	int score;
-} mem_seed_t; // unaligned memory
-
-typedef struct {
-	int n, m, first, rid;
-	uint32_t w:29, kept:2, is_alt:1;
-	float frac_rep;
-	int64_t pos;
-	mem_seed_t *seeds;
-} mem_chain_t;
-
-typedef struct { size_t n, m; mem_chain_t *a;  } mem_chain_v;
 
 #include "kbtree.h"
 
@@ -1205,12 +1198,19 @@ static void worker1(void *data, long i, int tid)
 	worker_t *w = (worker_t*)data;
 	if (!(w->opt->flag&MEM_F_PE)) {
 		if (bwa_verbose >= 4) printf("=====> Processing read '%s' <=====\n", w->seqs[i].name);
-		w->regs[i] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i].l_seq, w->seqs[i].seq, w->aux[tid]);
+		if (g_capt)
+			w->regs[i] = capt_mem_align1_core(w->opt, (const capt_t*)g_capt, w->bwt, w->bns, w->pac, w->seqs[i].l_seq, w->seqs[i].seq, w->aux[tid]);
+		else
+			w->regs[i] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i].l_seq, w->seqs[i].seq, w->aux[tid]);
 	} else {
 		if (bwa_verbose >= 4) printf("=====> Processing read '%s'/1 <=====\n", w->seqs[i<<1|0].name);
-		w->regs[i<<1|0] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i<<1|0].l_seq, w->seqs[i<<1|0].seq, w->aux[tid]);
-		if (bwa_verbose >= 4) printf("=====> Processing read '%s'/2 <=====\n", w->seqs[i<<1|1].name);
-		w->regs[i<<1|1] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i<<1|1].l_seq, w->seqs[i<<1|1].seq, w->aux[tid]);
+		if (g_capt) {
+			w->regs[i<<1|0] = capt_mem_align1_core(w->opt, (const capt_t*)g_capt, w->bwt, w->bns, w->pac, w->seqs[i<<1|0].l_seq, w->seqs[i<<1|0].seq, w->aux[tid]);
+			w->regs[i<<1|1] = capt_mem_align1_core(w->opt, (const capt_t*)g_capt, w->bwt, w->bns, w->pac, w->seqs[i<<1|1].l_seq, w->seqs[i<<1|1].seq, w->aux[tid]);
+		} else {
+			w->regs[i<<1|0] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i<<1|0].l_seq, w->seqs[i<<1|0].seq, w->aux[tid]);
+			w->regs[i<<1|1] = mem_align1_core(w->opt, w->bwt, w->bns, w->pac, w->seqs[i<<1|1].l_seq, w->seqs[i<<1|1].seq, w->aux[tid]);
+		}
 	}
 }
 

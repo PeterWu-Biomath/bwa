@@ -48,11 +48,13 @@ int bwa_bwtsw2(int argc, char *argv[]);
 
 int main_fastmap(int argc, char *argv[]);
 int main_mem(int argc, char *argv[]);
+int main_mem_capture(int argc, char *argv[]);
 int main_shm(int argc, char *argv[]);
 
 int main_pemerge(int argc, char *argv[]);
 int main_maxk(int argc, char *argv[]);
-	
+int main_index_capture(int argc, char *argv[]);
+
 static int usage()
 {
 	fprintf(stderr, "\n");
@@ -61,7 +63,9 @@ static int usage()
 	fprintf(stderr, "Contact: Heng Li <hli@ds.dfci.harvard.edu>\n\n");
 	fprintf(stderr, "Usage:   bwa <command> [options]\n\n");
 	fprintf(stderr, "Command: index         index sequences in the FASTA format\n");
+	fprintf(stderr, "         index-capture build capture sub-index for target enrichment\n");
 	fprintf(stderr, "         mem           BWA-MEM algorithm\n");
+	fprintf(stderr, "         mem_capture   BWA-MEM with capture acceleration\n");
 	fprintf(stderr, "         fastmap       identify super-maximal exact matches\n");
 	fprintf(stderr, "         pemerge       merge overlapping paired ends (EXPERIMENTAL)\n");
 	fprintf(stderr, "         aln           gapped/ungapped alignment\n");
@@ -109,9 +113,11 @@ int main(int argc, char *argv[])
 	else if (strcmp(argv[1], "bwasw") == 0) ret = bwa_bwtsw2(argc-1, argv+1);
 	else if (strcmp(argv[1], "fastmap") == 0) ret = main_fastmap(argc-1, argv+1);
 	else if (strcmp(argv[1], "mem") == 0) ret = main_mem(argc-1, argv+1);
+	else if (strcmp(argv[1], "mem_capture") == 0) ret = main_mem_capture(argc-1, argv+1);
 	else if (strcmp(argv[1], "shm") == 0) ret = main_shm(argc-1, argv+1);
 	else if (strcmp(argv[1], "pemerge") == 0) ret = main_pemerge(argc-1, argv+1);
 	else if (strcmp(argv[1], "maxk") == 0) ret = main_maxk(argc-1, argv+1);
+	else if (strcmp(argv[1], "index-capture") == 0) ret = main_index_capture(argc-1, argv+1);
 	else {
 		fprintf(stderr, "[main] unrecognized command '%s'\n", argv[1]);
 		return 1;
