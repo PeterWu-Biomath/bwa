@@ -358,9 +358,9 @@ void capt_set_intv(const capt_t *capt, int c, bwtintv_t *ik)
         ks_fwd += capt->end_cnt[b];
     for (int b = 0; b < 3 - c; b++)
         ks_rc += capt->end_cnt[b];
-    ik->x[0] = capt->l2[c] + 1 + ks_fwd;
-    ik->x[1] = capt->l2[3 - c] + 1 + ks_rc;
-    ik->x[2] = capt->l2[c + 1] - capt->l2[c] + capt->end_cnt[c];
+    ik->x[0] = capt->l2[c] + 1; //+ ks_fwd;
+    ik->x[1] = capt->l2[3 - c] + 1;// + ks_rc;
+    ik->x[2] = capt->l2[c + 1] - capt->l2[c];// + capt->end_cnt[c];
 }
 
 void capt_extend(const capt_t *capt, const bwtintv_t *ik,
@@ -370,18 +370,19 @@ void capt_extend(const capt_t *capt, const bwtintv_t *ik,
     uint64_t k = ik->x[!is_back] - 1;
     uint64_t l = k + ik->x[2];
     capt_2occ(capt, k, l, tk, tl);
-    uint64_t ks[4];
+    /*uint64_t ks[4];
     ks[0] = capt->end_cnt[0];
     ks[1] = capt->end_cnt[0] + capt->end_cnt[1];
     ks[2] = capt->end_cnt[0] + capt->end_cnt[1] + capt->end_cnt[2];
     ks[3] = capt->end_cnt[0] + capt->end_cnt[1] + capt->end_cnt[2] + capt->end_cnt[3];
+    */
     for (int i = 0; i < 4; i++) {
-        ok[i].x[!is_back] = capt->l2[i] + 1 + tl[i] + ks[i];
+        ok[i].x[!is_back] = capt->l2[i] + 1 + tl[i];// + ks[i];
         ok[i].x[2] = tk[i];
     }
     /* RC-strand rank: complement mapping A↔T(0↔3), C↔G(1↔2) */
-    int sentinel_num = l - k - tk[0] - tk[1] - tk[2] - tk[3];
-    ok[3].x[is_back] = ik->x[is_back] + sentinel_num;
+    //int sentinel_num = l - k - tk[0] - tk[1] - tk[2] - tk[3];
+    ok[3].x[is_back] = ik->x[is_back];// + sentinel_num;
     ok[2].x[is_back] = ok[3].x[is_back] + ok[3].x[2];
     ok[1].x[is_back] = ok[2].x[is_back] + ok[2].x[2];
     ok[0].x[is_back] = ok[1].x[is_back] + ok[1].x[2];

@@ -241,10 +241,9 @@ static int capt_ms_cmp(const void *a, const void *b)
     if (maxd > g_ms_k) maxd = g_ms_k;
 
     for (int d = 0; d < maxd; d++) {
-        int va = (A[d] == 4) ? -1 : (int)A[d];
-        int vb = (B[d] == 4) ? -1 : (int)B[d];
+        int va = (int)A[d], vb = (int)B[d];  /* $=4 > T, sorts last */
         if (va != vb) return (va < vb) ? -1 : 1;
-        if (va == -1) break;  /* both hit sentinel */
+        if (va == 4) break;  /* both hit sentinel */
     }
     if (rem_a != rem_b) return (rem_a < rem_b) ? -1 : 1;
     return 0;
@@ -280,8 +279,8 @@ capt_build_sa_multistr(const uint8_t *pac, int64_t l_pac,
         }
         fwd[len] = 4;
         g_ms_seqs[i * 2]     = fwd;
-        g_ms_seq_lens[i * 2]  = len;
-        total_suf += (uint64_t)len;
+        g_ms_seq_lens[i * 2]  = len + 1;   /* +1 for sentinel */
+        total_suf += (uint64_t)(len + 1);
         end_cnt[fwd[len - 1]]++;
 
         /* RC */
@@ -293,8 +292,8 @@ capt_build_sa_multistr(const uint8_t *pac, int64_t l_pac,
         }
         rc[len] = 4;
         g_ms_seqs[i * 2 + 1]     = rc;
-        g_ms_seq_lens[i * 2 + 1]  = len;
-        total_suf += (uint64_t)len;
+        g_ms_seq_lens[i * 2 + 1]  = len + 1;   /* +1 for sentinel */
+        total_suf += (uint64_t)(len + 1);
         end_cnt[rc[len - 1]]++;
     }
     *n_sa = total_suf;
