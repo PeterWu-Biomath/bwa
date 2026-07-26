@@ -229,7 +229,8 @@ extern "C" {
 	mem_alnreg_v mem_align1_core(const mem_opt_t *opt, const bwt_t *bwt,
 		const bntseq_t *bns, const uint8_t *pac, int l_seq, char *seq, void *buf);
 	mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt,
-		const bntseq_t *bns, int len, const uint8_t *seq, void *buf);
+		const bntseq_t *bns, int len, const uint8_t *seq, void *buf,
+		int64_t *perfect_idx);
 	int mem_chain_flt(const mem_opt_t *opt, int n_chn, mem_chain_t *a);
 	void mem_flt_chained_seeds(const mem_opt_t *opt, const bntseq_t *bns,
 		const uint8_t *pac, int l_query, const uint8_t *query,

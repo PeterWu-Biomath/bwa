@@ -774,7 +774,6 @@ static int capt_rp_cmp(const void *a, const void *b) {
 static void
 capt_build_pos_ms(const bwt_t *g_bwt,
                    const uint64_t *sa, uint64_t n_sa,
-                   const int64_t *t2p,
                    uint64_t **pos_rank, int64_t **pos_pac,
                    uint64_t *n_pos)
 {
@@ -799,9 +798,11 @@ capt_build_pos_ms(const bwt_t *g_bwt,
             ik = ok[3 - nb];
             if (d > 1000000) break;
         }
-        int64_t pac = t2p[i];
-        if (pac < 0) continue;
-        kv_push(capt_rp_t, rp, ((capt_rp_t){ ik.x[0], pac }));
+        /* push both directions: backward rank → PAC, forward rank → PAC */
+        int64_t pac0 = (int64_t)bwt_sa(g_bwt, ik.x[0]);
+        //int64_t pac1 = (int64_t)bwt_sa(g_bwt, ik.x[1]);
+        if (pac0 >= 0) kv_push(capt_rp_t, rp, ((capt_rp_t){ ik.x[0], pac0 }));
+        //if (pac1 >= 0) kv_push(capt_rp_t, rp, ((capt_rp_t){ ik.x[1], pac1 }));
     }
 
     if (bwa_verbose >= 3)
@@ -905,6 +906,8 @@ capt_dump(const char *prefix, const capt_t *capt)
     uint64_t sz_rleoff = capt->n_rle ? capt->n_sa * 8 : 0;
     uint64_t sz_posr   = capt->n_pos * 8;
     uint64_t sz_posp   = capt->n_pos * 8;
+    uint64_t sz_perfect_idx = capt->n_perfect_idx * sizeof(capt_perfect_idx_t);
+    uint64_t sz_perfect     = capt->n_perfect * sizeof(mem_alnreg_t);
 
     /* offsets */
     uint64_t off = CAPT_HDR_SZ;
@@ -917,6 +920,8 @@ capt_dump(const char *prefix, const capt_t *capt)
     uint64_t off_posr   = off; off += sz_posr;
     uint64_t off_posp   = off; off += sz_posp;
     uint64_t off_endcnt = off; off += 32;  /* 4 × uint64_t */
+    uint64_t off_perfect_idx = off; off += sz_perfect_idx;
+    uint64_t off_perfect     = off; off += sz_perfect;
 
     /* header */
     capt_hdr_t hdr;
@@ -925,6 +930,8 @@ capt_dump(const char *prefix, const capt_t *capt)
     hdr.version       = CAPT_VERSION;
     hdr.k             = capt->k;
     hdr.padding       = capt->padding;
+    hdr.rlen_lo       = capt->rlen_lo;
+    hdr.rlen_hi       = capt->rlen_hi;
     hdr.n_sa          = capt->n_sa;
     hdr.n_rle         = capt->n_rle;
     hdr.n_pos         = capt->n_pos;
@@ -938,6 +945,8 @@ capt_dump(const char *prefix, const capt_t *capt)
     hdr.off_rle_off   = off_rleof;
     hdr.off_pos_rank  = off_posr;
     hdr.off_pos_genome = off_posp;
+    hdr.n_perfect     = capt->n_perfect;
+    hdr.off_perfect   = off_perfect_idx;  /* index array starts here */
 
     FILE *fp = fopen(fn, "wb");
     if (!fp) {
@@ -955,9 +964,13 @@ capt_dump(const char *prefix, const capt_t *capt)
     if (capt->pos_rank)    fwrite(capt->pos_rank, 8, capt->n_pos, fp);
     if (capt->pos_pac)     fwrite(capt->pos_pac, 8, capt->n_pos, fp);
     fwrite(capt->end_cnt, 8, 4, fp);
+    if (capt->perfect_idx && capt->n_perfect_idx)
+        fwrite(capt->perfect_idx, sizeof(capt_perfect_idx_t), capt->n_perfect_idx, fp);
+    if (capt->perfect && capt->n_perfect)
+        fwrite(capt->perfect, sizeof(mem_alnreg_t), capt->n_perfect, fp);
     fclose(fp);
 
-    uint64_t total = off_endcnt + 32;
+    uint64_t total = off_endcnt + 32 + sz_perfect_idx + sz_perfect;
     fprintf(stderr, "[index-capture]   wrote %s (%.1f MB)\n",
             fn, (double)total / 1e6);
 }
@@ -970,6 +983,7 @@ static void usage(void)
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -p INT     padding around each region [0]\n");
     fprintf(stderr, "  -k INT     k-mer size, > max read length [200]\n");
+    fprintf(stderr, "  -r LO,HI   read length range (inclusive) [100,150]\n");
     fprintf(stderr, "  -o STR     output prefix (writes prefix.capt)\n");
     fprintf(stderr, "  -t INT     number of threads [16]\n");
     fprintf(stderr, "  -d STR     dump merged regions to STR/region.txt\n");
@@ -977,13 +991,14 @@ static void usage(void)
 
 int main_index_capture(int argc, char *argv[])
 {
-    int c, k = 200, padding = 0;
+    int c, k = 200, padding = 0, rlen_lo = 100, rlen_hi = 150;
     const char *output = NULL, *dumpdir = NULL;
 
-    while ((c = getopt(argc, argv, "p:k:o:t:d:")) >= 0) {
+    while ((c = getopt(argc, argv, "p:k:r:o:t:d:")) >= 0) {
         switch (c) {
         case 'p': padding = atoi(optarg); break;
         case 'k': k = atoi(optarg); break;
+        case 'r': sscanf(optarg, "%d,%d", &rlen_lo, &rlen_hi); break;
         case 'o': output = optarg; break;
         case 't': /* n_threads */ break;
         case 'd': dumpdir = optarg; break;
@@ -1012,6 +1027,8 @@ int main_index_capture(int argc, char *argv[])
     capt_t *capt = calloc(1, sizeof(capt_t));
     capt->k = k;
     capt->padding = padding;
+    capt->rlen_lo = rlen_lo;
+    capt->rlen_hi = rlen_hi;
 
     /* Load genome annotation */
     bntseq_t *bns = bns_restore(ref_path);
@@ -1114,7 +1131,7 @@ int main_index_capture(int argc, char *argv[])
 
     /* 8. Build position table */
     fprintf(stderr, "[index-capture] Step 8/8: Computing position table...\n");
-    capt_build_pos_ms(g_bwt, capt->sa, capt->n_sa, t2p,
+    capt_build_pos_ms(g_bwt, capt->sa, capt->n_sa,
                        &capt->pos_rank, &capt->pos_pac, &capt->n_pos);
 
     /* Dump position table if requested */
@@ -1123,6 +1140,67 @@ int main_index_capture(int argc, char *argv[])
     }
 
     free(t2p);
+
+    /* 9. Precompute alignment results via capt_mem_align1_core */
+    fprintf(stderr, "[index-capture] Step 9/9: Precomputing alignments...\n");
+    {
+        int n_lens = rlen_hi - rlen_lo + 1;
+        capt->n_perfect_idx = capt->n_sa * n_lens;
+        capt->perfect_idx = calloc(capt->n_perfect_idx, sizeof(capt_perfect_idx_t));
+
+        /* first pass: count total results, set up index offsets */
+        uint64_t total_results = 0;
+        for (uint64_t i = 0; i < capt->n_perfect_idx; i++)
+            capt->perfect_idx[i].offset = UINT64_MAX;  /* sentinel = not computed */
+
+        /* second pass: compute and store */
+        mem_opt_t *opt = mem_opt_init();
+        mem_alnreg_t *flat = NULL;
+        uint64_t flat_cap = 0, flat_used = 0;
+
+        for (uint64_t i = 0; i < capt->n_sa; i++) {
+            int si = (int)(capt->sa[i] >> 32);
+            int off = (int)(capt->sa[i] & 0xffffffff);
+            int slen = (int)g_ms_seq_lens[si] - off - 1;
+            if (slen < rlen_lo) continue;
+
+            int max_rlen = slen < rlen_hi ? slen : rlen_hi;
+            const uint8_t *src = g_ms_seqs[si] + off;
+
+            for (int rlen = rlen_lo; rlen <= max_rlen; rlen++) {
+                char *seq = malloc(rlen);
+                memcpy(seq, src, rlen);
+
+                mem_alnreg_v regs = capt_mem_align1_core(opt, capt, g_bwt,
+                    bns, pac, rlen, seq, NULL);
+                free(seq);
+
+                if (regs.n > 0 && regs.a[0].qb == 0 && regs.a[0].qe == rlen) {
+                    uint64_t idx_pos = i * n_lens + (rlen - rlen_lo);
+                    /* grow flat array if needed */
+                    if (flat_used + regs.n > flat_cap) {
+                        flat_cap = flat_cap ? flat_cap * 2 : 1024;
+                        flat = realloc(flat, flat_cap * sizeof(mem_alnreg_t));
+                    }
+                    capt->perfect_idx[idx_pos].offset = flat_used;
+                    capt->perfect_idx[idx_pos].count  = (uint32_t)regs.n;
+                    memcpy(&flat[flat_used], regs.a, regs.n * sizeof(mem_alnreg_t));
+                    flat_used += regs.n;
+                    total_results += regs.n;
+                }
+                free(regs.a);
+            }
+        }
+        free(opt);
+
+        capt->n_perfect = total_results;
+        capt->perfect = flat;
+
+        fprintf(stderr, "[index-capture]   %llu total alignments (n_lens=%d, flat=%.1f MB)\n",
+                (unsigned long long)total_results, n_lens,
+                (double)(flat_used * sizeof(mem_alnreg_t)) / 1e6);
+    }
+
     bwt_destroy(g_bwt);
 
     /* Serialize .capt */

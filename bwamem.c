@@ -146,7 +146,7 @@ static void smem_aux_destroy(smem_aux_t *a)
 	free(a);
 }
 
-static void mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, const uint8_t *seq, smem_aux_t *a)
+static int64_t mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, const uint8_t *seq, smem_aux_t *a)
 {
 	int i, k, x = 0, old_n;
 	int start_width = 1;
@@ -156,6 +156,16 @@ static void mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, co
 	while (x < len) {
 		if (seq[x] < 4) {
 			if (g_capt) x = capt_smem1((const capt_t*)g_capt, bwt, len, seq, x, start_width, &a->mem1, a->capt_tmpv); else x = bwt_smem1(bwt, len, seq, x, start_width, &a->mem1, a->tmpv);
+
+			/* perfect-match shortcut: single SMEM covering entire read */
+			if (x == len && a->mem1.n == 1
+			    && len >= ((const capt_t*)g_capt)->rlen_lo
+			    && len <= ((const capt_t*)g_capt)->rlen_hi) {
+				bwtintv_t *p = &a->mem1.a[0];
+				if ((int)(p->info >> 32) == 0 && (int)(p->info & 0xffffffff) == len)
+					return (int64_t)p->x[0];
+			}
+
 			for (i = 0; i < a->mem1.n; ++i) {
 				bwtintv_t *p = &a->mem1.a[i];
 				int slen = (uint32_t)p->info - (p->info>>32); // seed length
@@ -194,6 +204,7 @@ static void mem_collect_intv(const mem_opt_t *opt, const bwt_t *bwt, int len, co
 	}
 	// sort
 	ks_introsort(mem_intv, a->mem.n, a->mem.a);
+	return -1;
 }
 
 /************
@@ -267,7 +278,7 @@ void mem_print_chain(const bntseq_t *bns, mem_chain_v *chn)
 	}
 }
 
-mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, int len, const uint8_t *seq, void *buf)
+mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, int len, const uint8_t *seq, void *buf, int64_t *perfect_idx)
 {
 	int i, b, e, l_rep;
 	int64_t l_pac = bns->l_pac;
@@ -280,7 +291,12 @@ mem_chain_v mem_chain(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bn
 	tree = kb_init(chn, KB_DEFAULT_SIZE);
 
 	aux = buf? (smem_aux_t*)buf : smem_aux_init();
-	mem_collect_intv(opt, bwt, len, seq, aux);
+	int64_t pi = mem_collect_intv(opt, bwt, len, seq, aux);
+	if (perfect_idx) *perfect_idx = pi;
+	if (pi >= 0) { /* perfect match: skip chain building */
+		if (buf == 0) smem_aux_destroy(aux);
+		return chain;
+	}
 	for (i = 0, b = e = l_rep = 0; i < aux->mem.n; ++i) { // compute frac_rep
 		bwtintv_t *p = &aux->mem.a[i];
 		int sb = (p->info>>32), se = (uint32_t)p->info;
@@ -1074,13 +1090,14 @@ void mem_reg2sam(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac, 
 mem_alnreg_v mem_align1_core(const mem_opt_t *opt, const bwt_t *bwt, const bntseq_t *bns, const uint8_t *pac, int l_seq, char *seq, void *buf)
 {
 	int i;
+	int64_t perfect_idx = -1;
 	mem_chain_v chn;
 	mem_alnreg_v regs;
 
 	for (i = 0; i < l_seq; ++i) // convert to 2-bit encoding if we have not done so
 		seq[i] = seq[i] < 4? seq[i] : nst_nt4_table[(int)seq[i]];
 
-	chn = mem_chain(opt, bwt, bns, l_seq, (uint8_t*)seq, buf);
+	chn = mem_chain(opt, bwt, bns, l_seq, (uint8_t*)seq, buf, &perfect_idx);
 	chn.n = mem_chain_flt(opt, chn.n, chn.a);
 	mem_flt_chained_seeds(opt, bns, pac, l_seq, (uint8_t*)seq, chn.n, chn.a);
 	if (bwa_verbose >= 4) mem_print_chain(bns, &chn);

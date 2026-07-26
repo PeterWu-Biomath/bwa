@@ -11,10 +11,14 @@
 #include "bwt.h"
 #include "kvec.h"
 
+/* forward-declare for bwamem.h (which includes us back after defining mem_alnreg_t) */
+typedef struct capt_t capt_t;
+#include "bwamem.h"
+
 #define CAPT_MAGIC      "BWACAPT"
 #define CAPT_VERSION    1
 #define CAPT_HDR_SZ     128
-#define CAPT_OCC_INTV   16
+#define CAPT_OCC_INTV   1
 
 /* ── File header (packed, 128 bytes) ────────────────────────────────── */
 
@@ -38,9 +42,20 @@ typedef struct {
     uint64_t off_rle_off;    /* RLE per-suffix offsets (n_sa × 8) */
     uint64_t off_pos_rank;   /* position table ranks (n_pos × 8) */
     uint64_t off_pos_genome; /* position table coords (n_pos × 8) */
-    uint8_t  reserved[4];
+    int32_t  rlen_lo;        /* min read length */
+    int32_t  rlen_hi;        /* max read length */
+    uint64_t n_perfect;       /* number of precomputed perfect-match entries */
+    uint64_t off_perfect;     /* offset to perfect-match table */
 } capt_hdr_t;
 #pragma pack(pop)
+
+/* ── Precomputed alignments per (SA_idx, read_len) ──────────────────── */
+
+typedef struct {            /* index entry: maps (SA_idx, read_len) → results */
+    uint64_t offset;        /* offset into flat results array */
+    uint32_t count;         /* number of mem_alnreg_t at this offset */
+    uint32_t pad;
+} capt_perfect_idx_t;
 
 /* ── Data types for construction ───────────────────────────────────── */
 
@@ -56,9 +71,11 @@ typedef kvec_t(capt_region_t) capt_regions_v;
 
 /* ── Full in-memory capture index ──────────────────────────────────── */
 
-typedef struct {
+struct capt_t {
     int       k;             /* k-mer size */
     int       padding;       /* padding applied */
+    int       rlen_lo;       /* min read length */
+    int       rlen_hi;       /* max read length */
 
     uint64_t  n_sa;          /* sub-SA size */
     uint64_t *sa;            /* dense suffix array (PAC positions) */
@@ -76,7 +93,24 @@ typedef struct {
     int64_t  *pos_pac;       /* PAC coordinates (same order) */
 
     uint64_t  end_cnt[4];    /* bases at end of each region seq (fwd+RC) */
-} capt_t;
+
+    capt_perfect_idx_t *perfect_idx; /* index: n_sa × n_lens entries */
+    mem_alnreg_t       *perfect;     /* flat results: all alignments */
+    uint64_t  n_perfect;             /* total results in perfect[] */
+    uint64_t  n_perfect_idx;         /* = n_sa * n_lens */
+};
+
+/* O(1) lookup: returns (results, count) for (sa_idx, read_len) */
+static inline mem_alnreg_t *
+capt_perfect_get(const capt_t *capt, uint64_t sa_idx, int rlen, uint32_t *count) {
+    int off = rlen - capt->rlen_lo;
+    int n_lens = capt->rlen_hi - capt->rlen_lo + 1;
+    if (off < 0 || off >= n_lens) { *count = 0; return NULL; }
+    capt_perfect_idx_t *idx = &capt->perfect_idx[sa_idx * n_lens + off];
+    if (idx->count == 0) { *count = 0; return NULL; }
+    *count = idx->count;
+    return &capt->perfect[idx->offset];
+}
 
 /* ── Capture-aware interval ────────────────────────────────────────── */
 

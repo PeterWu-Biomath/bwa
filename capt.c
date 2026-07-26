@@ -36,13 +36,15 @@ capt_t *capt_restore(const char *fn)
     capt_t *c = calloc(1, sizeof(capt_t));
     c->k = hdr.k;
     c->padding = hdr.padding;
+    c->rlen_lo = hdr.rlen_lo;
+    c->rlen_hi = hdr.rlen_hi;
     c->n_sa = hdr.n_sa;
     c->n_pos = hdr.n_pos;
 
-    fprintf(stderr, "[M::%s] loading %s: n_sa=%llu n_pos=%llu n_rle=%llu k=%d\n",
+    fprintf(stderr, "[M::%s] loading %s: n_sa=%llu n_pos=%llu n_rle=%llu k=%d rlen=%d-%d\n",
             __func__, fn, (unsigned long long)c->n_sa,
             (unsigned long long)c->n_pos,
-            (unsigned long long)hdr.n_rle, c->k);
+            (unsigned long long)hdr.n_rle, c->k, c->rlen_lo, c->rlen_hi);
 
     /* Read SA */
     c->sa = malloc(c->n_sa * 8);
@@ -109,6 +111,18 @@ capt_t *capt_restore(const char *fn)
         fread(c->end_cnt, 8, 4, fp);
     }
 
+    /* Read perfect-match index + flat results */
+    c->n_perfect     = hdr.n_perfect;
+    c->n_perfect_idx = c->n_sa * (c->rlen_hi - c->rlen_lo + 1);
+    if (hdr.n_perfect > 0 && hdr.off_perfect > 0) {
+        c->perfect_idx = malloc(c->n_perfect_idx * sizeof(capt_perfect_idx_t));
+        fseek(fp, hdr.off_perfect, SEEK_SET);
+        fread(c->perfect_idx, sizeof(capt_perfect_idx_t), c->n_perfect_idx, fp);
+
+        c->perfect = malloc(hdr.n_perfect * sizeof(mem_alnreg_t));
+        fread(c->perfect, sizeof(mem_alnreg_t), hdr.n_perfect, fp);
+    }
+
     fclose(fp);
     return c;
 
@@ -133,6 +147,8 @@ void capt_destroy(capt_t *c)
     free(c->rle_offsets);
     free(c->pos_rank);
     free(c->pos_pac);
+    free(c->perfect_idx);
+    free(c->perfect);
     free(c);
 }
 
@@ -140,13 +156,7 @@ void capt_destroy(capt_t *c)
 
 uint64_t capt_occ(const capt_t *capt, int c, uint64_t k)
 {
-    uint64_t blk = k / CAPT_OCC_INTV;
-    uint64_t base = capt->occ[c][blk];
-    uint64_t start = blk * CAPT_OCC_INTV;
-    for (uint64_t i = start; i < k; i++)
-        if (capt->bwt[i] == (uint8_t)c)
-            base++;
-    return base;
+    return capt->occ[c][k];  /* full table: OCC at every position */
 }
 
 /* ── RLE lookup ─────────────────────────────────────────────────────── */
@@ -316,36 +326,11 @@ static void capt_2occ(const capt_t *capt, uint64_t k, uint64_t l,
     if (l > capt->n_sa) l = capt->n_sa;
     if (k > capt->n_sa) k = capt->n_sa;
 
-    /* OCC at k: fetch block values + linear scan once for all 4 bases */
-    uint64_t blk_k = k / CAPT_OCC_INTV, start_k = blk_k * CAPT_OCC_INTV;
-    uint64_t oc_k[4];
-    for (int c = 0; c < 4; c++) oc_k[c] = capt->occ[c][blk_k];
-    for (uint64_t i = start_k; i < k; i++) {
-        uint8_t b = capt->bwt[i];
-        if (b < 4) oc_k[b]++;
-    }
-
-    /* OCC at l: same */
-    uint64_t blk_l = l / CAPT_OCC_INTV, start_l = blk_l * CAPT_OCC_INTV;
-    uint64_t oc_l[4];
-    /* fast path: if same block as k, copy and extend */
-    if (blk_l == blk_k) {
-        for (int c = 0; c < 4; c++) oc_l[c] = oc_k[c];
-        for (uint64_t i = k; i < l; i++) {
-            uint8_t b = capt->bwt[i];
-            if (b < 4) oc_l[b]++;
-        }
-    } else {
-        for (int c = 0; c < 4; c++) oc_l[c] = capt->occ[c][blk_l];
-        for (uint64_t i = start_l; i < l; i++) {
-            uint8_t b = capt->bwt[i];
-            if (b < 4) oc_l[b]++;
-        }
-    }
-
     for (int c = 0; c < 4; c++) {
-        tk[c] = oc_l[c] - oc_k[c];
-        tl[c] = oc_k[c];
+        uint64_t oc_k = capt->occ[c][k];
+        uint64_t oc_l = capt->occ[c][l];
+        tk[c] = oc_l - oc_k;   /* count of base c in BWT[k..l) */
+        tl[c] = oc_k;           /* count of base c in BWT[0..k) */
     }
 }
 
@@ -531,7 +516,7 @@ int capt_smem1(const capt_t *capt, const bwt_t *g_bwt,
 	capt_intv_t ik, ok;
 	capt_intv_v a[2], *prev, *curr, *swap;
 
-	mem->n = 0;
+	memset(mem, 0, sizeof(*mem));
 	if (q[x] > 3) return x + 1;
 	if (min_intv < 1) min_intv = 1; // the interval size should be at least 1
 	kv_init(a[0]); kv_init(a[1]);

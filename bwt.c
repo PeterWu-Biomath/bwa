@@ -87,7 +87,12 @@ void bwt_cal_sa(bwt_t *bwt, int intv)
 
 bwtint_t bwt_sa(const bwt_t *bwt, bwtint_t k)
 {
-	if (bwt_sa_override) return bwt_sa_override(bwt, k);
+	if (bwt_sa_override) 
+	{
+		bwtint_t t=bwt_sa_override(bwt, k);
+		//fprintf(stdout,"[sa] k=%lld pos=%lld\n",k, t);
+		return t;
+	}
 	bwtint_t sa = 0, mask = bwt->sa_intv - 1;
 	while (k & mask) {
 		++sa;

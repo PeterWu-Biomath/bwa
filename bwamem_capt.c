@@ -23,6 +23,7 @@ mem_alnreg_v capt_mem_align1_core(const mem_opt_t *opt,
                                    int l_seq, char *seq, void *buf)
 {
     int i;
+    int64_t perfect_idx = -1;
     mem_chain_v chn;
     mem_alnreg_v regs;
 
@@ -30,7 +31,20 @@ mem_alnreg_v capt_mem_align1_core(const mem_opt_t *opt,
         seq[i] = seq[i] < 4 ? seq[i] : nst_nt4_table[(int)seq[i]];
 
     /* capture-aware SMEM */
-    chn = mem_chain(opt, g_bwt, bns, l_seq, (uint8_t *)seq, buf);
+    chn = mem_chain(opt, g_bwt, bns, l_seq, (uint8_t *)seq, buf, &perfect_idx);
+
+    /* perfect-match shortcut: skip chaining, alignment, dedup */
+    if (perfect_idx >= 0) {
+        uint32_t count;
+        mem_alnreg_t *pre = capt_perfect_get(capt, (uint64_t)perfect_idx, l_seq, &count);
+        kv_init(regs);
+        if (pre && count > 0) {
+            kv_resize(mem_alnreg_t, regs, count);
+            memcpy(regs.a, pre, count * sizeof(mem_alnreg_t));
+            regs.n = count;
+        }
+        return regs;
+    }
     chn.n = mem_chain_flt(opt, chn.n, chn.a);
     mem_flt_chained_seeds(opt, bns, pac, l_seq, (uint8_t *)seq, chn.n, chn.a);
     if (bwa_verbose >= 4)
