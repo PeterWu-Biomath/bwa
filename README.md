@@ -1,195 +1,96 @@
-[![Build Status](https://github.com/lh3/bwa/actions/workflows/ci.yaml/badge.svg)](https://github.com/lh3/bwa/actions)
-[![SourceForge Downloads](https://img.shields.io/sourceforge/dt/bio-bwa.svg?label=SF%20downloads)](https://sourceforge.net/projects/bio-bwa/files/?source=navbar)
-[![GitHub Downloads](https://img.shields.io/github/downloads/lh3/bwa/total.svg?style=flat&label=GitHub%20downloads)](https://github.com/lh3/bwa/releases)
-[![BioConda Install](https://img.shields.io/conda/dn/bioconda/bwa.svg?style=flag&label=BioConda%20install)](https://anaconda.org/bioconda/bwa)
+# BWA-Capture: Targeted Alignment with Capture Sub-Index
 
-**Note: [minimap2][minimap2] has replaced BWA-MEM for __PacBio and Nanopore__ read
-alignment.** It retains all major BWA-MEM features, but is ~50 times as fast,
-more versatile, more accurate and produces better base-level alignment.
-[BWA-MEM2][bwa-mem2] is 50-100% faster than BWA-MEM and outputs identical alignments.
+BWA-Capture extends [BWA](README_bwa.md) with a capture sub-index that accelerates alignment for targeted sequencing (e.g., exome, panel) by restricting the search space to regions of interest.
 
-[minimap2]: https://github.com/lh3/minimap2
-[bwa-mem2]: https://github.com/bwa-mem2/bwa-mem2
+## Overview
 
-## Getting started
+Three modules work together:
 
-	git clone https://github.com/lh3/bwa.git
-	cd bwa; make
-	./bwa index ref.fa
-	./bwa mem ref.fa read-se.fq.gz | gzip -3 > aln-se.sam.gz
-	./bwa mem ref.fa read1.fq read2.fq | gzip -3 > aln-pe.sam.gz
+```
+Read
+ │
+ ├─ 1. Dense SA for target regions ──→ sub-index SMEM search
+ │      (capt_smem1, capt_extend)         │
+ │                                         ├─ hits target → fast path
+ │                                         └─ no hit ──→ fallback to genome BWT
+ │
+ ├─ 2. Cached genome SA lookup ──→ position table
+ │      (capt_lookup_pos)              │
+ │       converts sub-SA rank → genome SA rank in O(1)
+ │
+ └─ 3. Perfect-match shortcut ──→ precomputed alignment table
+        (capt_perfect_get)            │
+        read_len ∈ [rlen_lo, rlen_hi]  │
+        + SMEM covers [0, len)         │
+        → return cached mem_alnreg_t directly
+        → skip chaining, SW, dedup entirely
+```
 
-## Introduction
+## Module 1: Dense SA for Target Regions
 
-BWA is a software package for mapping DNA sequences against a large reference
-genome, such as the human genome. It consists of three algorithms:
-BWA-backtrack, BWA-SW and BWA-MEM. The first algorithm is designed for Illumina
-sequence reads up to 100bp, while the rest two for longer sequences ranged from
-70bp to a few megabases. BWA-MEM and BWA-SW share similar features such as the
-support of long reads and chimeric alignment, but BWA-MEM, which is the latest,
-is generally recommended as it is faster and more accurate. BWA-MEM also has
-better performance than BWA-backtrack for 70-100bp Illumina reads.
+Builds a standalone suffix array over BED target regions (plus padding), with dense BWT, OCC, and LCP. All suffixes are sorted by lexicographic order of the concatenated region sequences (forward + reverse complement).
 
-For all the algorithms, BWA first needs to construct the FM-index for the
-reference genome (the **index** command). Alignment algorithms are invoked with
-different sub-commands: **aln/samse/sampe** for BWA-backtrack,
-**bwasw** for BWA-SW and **mem** for the BWA-MEM algorithm.
+- **SMEM search**: `capt_smem1` runs entirely on the sub-index for reads that hit the target
+- **Extension**: `capt_extend` / `capt_extend_bail` for backward/forward extension
+- **Fallback**: reads that escape the target region fall back to the genome BWT seamlessly via interval translation
 
-## Availability
+## Module 2: Cached Genome SA Lookup
 
-BWA is released under [GPLv3][1]. The latest source code is [freely
-available at github][2]. Released packages can [be downloaded][3] at
-SourceForge. After you acquire the source code, simply use `make` to compile
-and copy the single executable `bwa` to the destination you want. The only
-dependency required to build BWA is [zlib][14].
+The position table maps sub-SA ranks to genome PAC coordinates in O(1). Built via multi-string BWT merge:
 
-Since 0.7.11, precompiled binary for x86\_64-linux is available in [bwakit][17].
-In addition to BWA, this self-consistent package also comes with bwa-associated
-and 3rd-party tools for proper BAM-to-FASTQ conversion, mapping to ALT contigs,
-adapter triming, duplicate marking, HLA typing and associated data files.
+- Sub-SA suffixes and genome BWT suffixes are merged in a single pass
+- Each sub-SA entry records its corresponding genome SA rank
+- At runtime: `capt_lookup_pos(capt, rank)` returns the genome position directly, no binary search
 
-## Seeking help
+## Module 3: Perfect-Match Shortcut
 
-The detailed usage is described in the man page available together with the
-source code. You can use `man ./bwa.1` to view the man page in a terminal. The
-[HTML version][4] of the man page can be found at the [BWA website][5]. If you
-have questions about BWA, you may [sign up the mailing list][6] and then send
-the questions to [bio-bwa-help@sourceforge.net][7]. You may also ask questions
-in forums such as [BioStar][8] and [SEQanswers][9].
+For reads in a precomputed length range that exactly match a suffix in the sub-SA, the full alignment result (`mem_alnreg_t`) is cached in the index.
 
-## Citing BWA
+**Index time** (Step 9): For each SA suffix with ≥ `rlen_lo` bases, for each read length in `[rlen_lo, rlen_hi]`, run `capt_mem_align1_core` and store all resulting `mem_alnreg_t` entries.
 
-* Li H. and Durbin R. (2009) Fast and accurate short read alignment with
- Burrows-Wheeler transform. *Bioinformatics*, **25**, 1754-1760. [PMID:
- [19451168][10]]. (if you use the BWA-backtrack algorithm)
+**Runtime**: In `mem_collect_intv`, the first `capt_smem1` call checks if the SMEM covers `[0, len)`. If so and `len ∈ [rlen_lo, rlen_hi]`, return the SA index immediately. `capt_mem_align1_core` then looks up `capt_perfect_get(capt, sa_idx, len, &count)` and returns the cached results — skipping `mem_chain_flt`, `mem_flt_chained_seeds`, `mem_chain2aln`, and `mem_sort_dedup_patch` entirely.
 
-* Li H. and Durbin R. (2010) Fast and accurate long-read alignment with
- Burrows-Wheeler transform. *Bioinformatics*, **26**, 589-595. [PMID:
- [20080505][11]]. (if you use the BWA-SW algorithm)
+## Building the Capture Index
 
-* Li H. (2013) Aligning sequence reads, clone sequences and assembly contigs
- with BWA-MEM. [arXiv:1303.3997v2][12] [q-bio.GN]. (if you use the BWA-MEM
- algorithm or the **fastmap** command, or want to cite the whole BWA package)
+```bash
+# Build genome BWT (standard BWA)
+bwa index ref.fa
 
-Please note that the last reference is a preprint hosted at [arXiv.org][13]. I
-do not have plan to submit it to a peer-reviewed journal in the near future.
+# Build capture sub-index
+bwa index-capture ref.fa targets.bed -p 200 -r 100,150 -o prefix
 
-## Frequently asked questions (FAQs)
+# Options:
+#   -p INT     padding around each region [0]
+#   -r LO,HI   read length range for perfect-match precomputation [100,150]
+#   -k INT     k-mer size, > max read length [200]
+#   -o STR     output prefix (writes prefix.capt)
+#   -d STR     dump merged regions to directory
+```
 
-1. [What types of data does BWA work with?](#type)
-2. [Why does a read appear multiple times in the output SAM?](#multihit)
-3. [Does BWA work on reference sequences longer than 4GB in total?](#4gb)
-4. [Why can one read in a pair has high mapping quality but the other has zero?](#pe0)
-5. [How can a BWA-backtrack alignment stands out of the end of a chromosome?](#endref)
-6. [Does BWA work with ALT contigs in the GRCh38 release?](#altctg)
-7. [Can I just run BWA-MEM against GRCh38+ALT without post-processing?](#postalt)
-8. [Why does BWA use a lot of memory?](#largemem)
+This produces `prefix.capt` containing:
+- Dense SA + BWT + OCC + LCP
+- RLE-encoded per-suffix metadata
+- Position table (sub-SA rank → genome PAC)
+- Perfect-match alignment table (indexed by SA_idx × read_len)
 
-#### <a name="type"></a>1. What types of data does BWA work with?
+## Alignment
 
-BWA works with a variety types of DNA sequence data, though the optimal
-algorithm and setting may vary. The following list gives the recommended
-settings:
+```bash
+bwa mem -C prefix ref.fa reads.fq > aln.sam
+```
 
-* Illumina/454/IonTorrent single-end reads longer than ~70bp or assembly
-  contigs up to a few megabases mapped to a closely related reference genome:
+The `-C` flag loads the capture index and activates all three modules.
 
-		bwa mem ref.fa reads.fq > aln.sam
+## Files
 
-* Illumina single-end reads shorter than ~70bp:
+| File | Role |
+|------|------|
+| `capt.h` | Data structures, constants, lookup API |
+| `capt.c` | Runtime: load, query, verify, extend |
+| `bwa_index_capt.c` | Index construction (Steps 1-9) |
+| `bwamem_capt.c` | Alignment core with perfect-match shortcut |
+| `bwamem.c` | Modified `mem_collect_intv` for shortcut detection |
 
-		bwa aln ref.fa reads.fq > reads.sai; bwa samse ref.fa reads.sai reads.fq > aln-se.sam
+## License
 
-* Illumina/454/IonTorrent paired-end reads longer than ~70bp:
-
-		bwa mem ref.fa read1.fq read2.fq > aln-pe.sam
-
-* Illumina paired-end reads shorter than ~70bp:
-
-		bwa aln ref.fa read1.fq > read1.sai; bwa aln ref.fa read2.fq > read2.sai
-		bwa sampe ref.fa read1.sai read2.sai read1.fq read2.fq > aln-pe.sam
-
-* PacBio subreads or Oxford Nanopore reads to a reference genome:
-
-		bwa mem -x pacbio ref.fa reads.fq > aln.sam
-		bwa mem -x ont2d ref.fa reads.fq > aln.sam
-
-BWA-MEM is recommended for query sequences longer than ~70bp for a variety of
-error rates (or sequence divergence). Generally, BWA-MEM is more tolerant with
-errors given longer query sequences as the chance of missing all seeds is small.
-As is shown above, with non-default settings, BWA-MEM works with Oxford Nanopore
-reads with a sequencing error rate over 20%.
-
-#### <a name="multihit"></a>2. Why does a read appear multiple times in the output SAM?
-
-BWA-SW and BWA-MEM perform local alignments. If there is a translocation, a gene
-fusion or a long deletion, a read bridging the break point may have two hits,
-occupying two lines in the SAM output. With the default setting of BWA-MEM, one
-and only one line is primary and is soft clipped; other lines are tagged with
-0x800 SAM flag (supplementary alignment) and are hard clipped.
-
-#### <a name="4gb"></a>3. Does BWA work on reference sequences longer than 4GB in total?
-
-Yes. Since 0.6.x, all BWA algorithms work with a genome with total length over
-4GB. However, individual chromosome should not be longer than 2GB.
-
-#### <a name="pe0"></a>4. Why can one read in a pair have a high mapping quality but the other has zero?
-
-This is correct. Mapping quality is assigned for individual read, not for a read
-pair. It is possible that one read can be mapped unambiguously, but its mate
-falls in a tandem repeat and thus its accurate position cannot be determined.
-
-#### <a name="endref"></a>5. How can a BWA-backtrack alignment stand out of the end of a chromosome?
-
-Internally BWA concatenates all reference sequences into one long sequence. A
-read may be mapped to the junction of two adjacent reference sequences. In this
-case, BWA-backtrack will flag the read as unmapped (0x4), but you will see
-position, CIGAR and all the tags. A similar issue may occur to BWA-SW alignment
-as well. BWA-MEM does not have this problem.
-
-#### <a name="altctg"></a>6. Does BWA work with ALT contigs in the GRCh38 release?
-
-Yes, since 0.7.11, BWA-MEM officially supports mapping to GRCh38+ALT.
-BWA-backtrack and BWA-SW don't properly support ALT mapping as of now. Please
-see [README-alt.md][18] for details. Briefly, it is recommended to use
-[bwakit][17], the binary release of BWA, for generating the reference genome
-and for mapping.
-
-#### <a name="postalt"></a>7. Can I just run BWA-MEM against GRCh38+ALT without post-processing?
-
-If you are not interested in hits to ALT contigs, it is okay to run BWA-MEM
-without post-processing. The alignments produced this way are very close to
-alignments against GRCh38 without ALT contigs. Nonetheless, applying
-post-processing helps to reduce false mappings caused by reads from the
-diverged part of ALT contigs and also enables HLA typing. It is recommended to
-run the post-processing script.
-
-### <a name="largemem"></a>8. Why does BWA use a lot of memory?
-
-This is typically caused by FASTQ generated from a coordinate-sorted BAM.
-BWA uses a lot more memory for centromeric reads than for unique reads.
-In a FASTQ file generated from a sequencing run, centromeric reads are rare in each batch and rarely cause troubles.
-However, in a coordinate-sorted FASTQ file, a whole batch could consist of centromeric reads.
-Such a batch will take a lot more memory and time to map; the insert size estimate will be distorted as well.
-General rule: ***NEVER*** use Picard SamToFastq on coordiate-sorted BAM;
-use samtools [collate+fastq][remap] instead.
-
-[remap]: https://lh3.github.io/2021/07/06/remapping-an-aligned-bam
-[1]: http://en.wikipedia.org/wiki/GNU_General_Public_License
-[2]: https://github.com/lh3/bwa
-[3]: http://sourceforge.net/projects/bio-bwa/files/
-[4]: http://bio-bwa.sourceforge.net/bwa.shtml
-[5]: http://bio-bwa.sourceforge.net/
-[6]: https://lists.sourceforge.net/lists/listinfo/bio-bwa-help
-[7]: mailto:bio-bwa-help@sourceforge.net
-[8]: http://biostars.org
-[9]: http://seqanswers.com/
-[10]: http://www.ncbi.nlm.nih.gov/pubmed/19451168
-[11]: http://www.ncbi.nlm.nih.gov/pubmed/20080505
-[12]: http://arxiv.org/abs/1303.3997
-[13]: http://arxiv.org/
-[14]: http://zlib.net/
-[15]: https://github.com/lh3/bwa/tree/mem
-[16]: ftp://ftp.ncbi.nlm.nih.gov/genbank/genomes/Eukaryotes/vertebrates_mammals/Homo_sapiens/GRCh38/seqs_for_alignment_pipelines/
-[17]: http://sourceforge.net/projects/bio-bwa/files/bwakit/
-[18]: https://github.com/lh3/bwa/blob/master/README-alt.md
+Same as BWA (GPLv3). See [README_bwa.md](README_bwa.md) for the original BWA documentation.
