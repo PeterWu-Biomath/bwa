@@ -4,7 +4,7 @@ BWA-Capture extends [BWA](README_bwa.md) with a capture sub-index that accelerat
 
 ## Overview
 
-In panel sequencing, only a small fraction of the genome is targeted for enrichment and sequencing. A typical WES panel has ~50M target length and diagnostic panel would span at 100K~2M. BWA-Capture exploits this sparsity: reads that originate from target regions are enriched through a dense sub-index built exclusively over those regions, while off-target reads fall back to the full genome BWT with minimal overhead.
+In panel sequencing, only a small fraction of the genome is targeted for enrichment and sequencing. A typical WES panel has \~50M target length and diagnostic panel would span at 100K\~2M. BWA-Capture exploits this sparsity: reads that originate from target regions are enriched through a dense sub-index built exclusively over those regions, while off-target reads fall back to the full genome BWT with minimal overhead.
 
 BWA-Capture is designed to produce results identical to standard BWA, so it can replace BWA in existing pipelines without downstream validation.
 
