@@ -1,15 +1,25 @@
 # BWA-Capture: Targeted Alignment with Capture Sub-Index
 
-BWA-Capture extends [BWA](README_bwa.md) with a capture sub-index that accelerates alignment for targeted sequencing (e.g., exome, panel) by restricting the search space to regions of interest.
+BWA-Capture extends [BWA](README_bwa.md) with a capture sub-index that accelerates alignment for targeted sequencing (e.g., exome, panel) by starting search from regions of interest.
 
 ## Overview
+
+In panel sequencing, only a small fraction of the genome is targeted for enrichment and sequencing. A typical WES panel has ~50M target length and diagnostic panel would span at 100K~2M. BWA-Capture exploits this sparsity: reads that originate from target regions are enriched through a dense sub-index built exclusively over those regions, while off-target reads fall back to the full genome BWT with minimal overhead.
+
+BWA-Capture is designed to produce results identical to standard BWA, so it can replace BWA in existing pipelines without downstream validation.
+
+To achieve this, BWA-Capture introduces three modules. The first is a dense suffix array over the target regions with an uncompressed OCC table — trading index size for fast rank queries during SMEM search. When SMEM extension reaches the boundary of a target region or fails to extend, the sub-SA interval is translated to a genome SA interval via the position table, and alignment continues seamlessly on the full genome BWT. A lookup table maps (sub-SA rank, query length) to genome SA rank, compressed via run-length encoding (RLE).
+
+The second module is a cached genome SA lookup — a table of (SA rank, genome position) entries covering only positions that fall within regions of interest. On a cache hit, the position is returned directly; on a miss, the query falls back to the standard SA lookup.
+
+The third module introduces a shortcut in `capt_mem_align1_core` for reads that align perfectly within a target region. During index construction, the full `mem_alnreg_t` result is precomputed for every suffix in the sub-SA across a configurable read-length range `[rlen_lo, rlen_hi]`. At runtime, when a read's SMEM covers its full length and its length falls within that range, the cached result is returned via `capt_perfect_get` — skipping chaining, Smith-Waterman, and deduplication entirely.
 
 Three modules work together:
 
 ```
 Read
  │
- ├─ 1. Dense SA for target regions ──→ sub-index SMEM search
+ ├─ 1. SA for target regions ──→ sub-index SMEM search
  │      (capt_smem1, capt_extend)         │
  │                                         ├─ hits target → fast path
  │                                         └─ no hit ──→ fallback to genome BWT
@@ -76,7 +86,7 @@ This produces `prefix.capt` containing:
 ## Alignment
 
 ```bash
-bwa mem -C prefix ref.fa reads.fq > aln.sam
+bwa mem_capture <capt_prefix> [mem options] <ref.fa> <in.fq>
 ```
 
 The `-C` flag loads the capture index and activates all three modules.
